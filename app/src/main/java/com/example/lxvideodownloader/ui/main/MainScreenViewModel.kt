@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.lxvideodownloader.core.model.DownloadTask
 import com.example.lxvideodownloader.core.model.HlsPlaylist
 import com.example.lxvideodownloader.core.model.StreamVariant
+import com.example.lxvideodownloader.core.sniffer.DetectedVideo
+import com.example.lxvideodownloader.core.sniffer.SourceType
 import com.example.lxvideodownloader.core.storage.CompletedVideo
 import com.example.lxvideodownloader.data.DataRepository
 import com.example.lxvideodownloader.data.DefaultDataRepository
@@ -24,7 +26,9 @@ data class MainUiState(
     val isInspecting: Boolean = false,
     val errorMessage: String? = null,
     val detectedVariants: List<StreamVariant>? = null,
-    val playingVideo: CompletedVideo? = null
+    val playingVideo: CompletedVideo? = null,
+    /** Non-null when the ViewModel wants to navigate to the WebView browser */
+    val pendingWebBrowserUrl: String? = null
 )
 
 class MainScreenViewModel(
@@ -61,14 +65,22 @@ class MainScreenViewModel(
         _uiState.update { it.copy(playingVideo = video) }
     }
 
+    fun consumeWebBrowserNavigation() {
+        _uiState.update { it.copy(pendingWebBrowserUrl = null) }
+    }
+
     fun refreshVideos(context: Context) {
         dataRepository.refreshVideos(context)
     }
 
+    /**
+     * Determines whether the entered URL is a direct M3U8 link (fast-path) or a web page
+     * that needs WebView-based video extraction.
+     */
     fun inspectAndDownload(context: Context) {
         val url = _uiState.value.urlInput.trim()
         if (url.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Please enter an M3U8 video URL") }
+            _uiState.update { it.copy(errorMessage = "Please enter a video URL or web page") }
             return
         }
 
@@ -77,6 +89,40 @@ class MainScreenViewModel(
             return
         }
 
+        val cleanUrl = url.substringBefore("?").substringBefore("#").lowercase()
+
+        // Fast-path: direct M3U8 URL → parse and download directly
+        if (cleanUrl.endsWith(".m3u8")) {
+            inspectM3U8(context, url)
+            return
+        }
+
+        // Check if it looks like a direct video file URL
+        val directVideoExtensions = listOf(".mp4", ".webm", ".mkv", ".avi", ".mov", ".flv", ".ts", ".3gp")
+        if (directVideoExtensions.any { cleanUrl.endsWith(it) }) {
+            // Direct video file URL — download immediately
+            val title = _uiState.value.titleInput.trim().ifBlank {
+                "video_${System.currentTimeMillis()}"
+            }
+            dataRepository.startDirectDownload(context, url, title)
+            _uiState.update {
+                it.copy(
+                    urlInput = "",
+                    titleInput = "",
+                    selectedTab = 1 // Switch to Active Downloads tab
+                )
+            }
+            return
+        }
+
+        // Otherwise: open WebView browser to sniff for videos
+        _uiState.update { it.copy(pendingWebBrowserUrl = url) }
+    }
+
+    /**
+     * Existing M3U8 inspection logic (fast-path).
+     */
+    private fun inspectM3U8(context: Context, url: String) {
         viewModelScope.launch {
             _uiState.update { it.copy(isInspecting = true, errorMessage = null) }
             try {
@@ -84,7 +130,6 @@ class MainScreenViewModel(
                 when (playlist) {
                     is HlsPlaylist.Master -> {
                         if (playlist.variants.size > 1) {
-                            // Let user pick quality
                             _uiState.update {
                                 it.copy(
                                     isInspecting = false,
@@ -92,7 +137,6 @@ class MainScreenViewModel(
                                 )
                             }
                         } else {
-                            // Single variant or default
                             val variant = playlist.variants.firstOrNull()
                             startDownload(context, variant)
                         }
@@ -106,6 +150,34 @@ class MainScreenViewModel(
                     it.copy(
                         isInspecting = false,
                         errorMessage = "Could not parse M3U8 stream: ${e.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Called when a video is selected from the WebView browser's detected videos panel.
+     */
+    fun onWebVideoSelected(context: Context, video: DetectedVideo) {
+        val title = _uiState.value.titleInput.trim().ifBlank {
+            video.pageTitle.takeIf { it.isNotBlank() } ?: "video_${System.currentTimeMillis()}"
+        }
+
+        when (video.sourceType) {
+            SourceType.M3U8 -> {
+                // Feed M3U8 URL into existing flow (quality selection, etc.)
+                _uiState.update { it.copy(urlInput = video.url, titleInput = title) }
+                inspectM3U8(context, video.url)
+            }
+            else -> {
+                // Direct download for MP4, WEBM, etc.
+                dataRepository.startDirectDownload(context, video.url, title)
+                _uiState.update {
+                    it.copy(
+                        urlInput = "",
+                        titleInput = "",
+                        selectedTab = 1
                     )
                 }
             }

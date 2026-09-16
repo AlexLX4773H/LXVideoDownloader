@@ -20,6 +20,10 @@ data class CompletedVideo(
 
 object VideoStorageHelper {
 
+    private val VIDEO_EXTENSIONS = listOf(
+        ".mp4", ".ts", ".webm", ".mkv", ".avi", ".mov", ".flv", ".3gp", ".mpeg", ".mpg", ".wmv"
+    )
+
     fun getVideosDirectory(context: Context): File {
         val dir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) 
             ?: File(context.filesDir, "movies")
@@ -29,14 +33,15 @@ object VideoStorageHelper {
         return dir
     }
 
-    fun generateOutputFile(context: Context, rawTitle: String): File {
+    fun generateOutputFile(context: Context, rawTitle: String, extension: String = "mp4"): File {
         val safeName = rawTitle.replace(Regex("[^a-zA-Z0-9._-]"), "_")
             .ifBlank { "video_${System.currentTimeMillis()}" }
+        val ext = extension.removePrefix(".")
         val dir = getVideosDirectory(context)
-        var file = File(dir, "$safeName.mp4")
+        var file = File(dir, "$safeName.$ext")
         var counter = 1
         while (file.exists()) {
-            file = File(dir, "${safeName}_$counter.mp4")
+            file = File(dir, "${safeName}_$counter.$ext")
             counter++
         }
         return file
@@ -44,8 +49,8 @@ object VideoStorageHelper {
 
     fun listCompletedVideos(context: Context): List<CompletedVideo> {
         val dir = getVideosDirectory(context)
-        val files = dir.listFiles { f -> 
-            f.isFile && (f.name.endsWith(".mp4", ignoreCase = true) || f.name.endsWith(".ts", ignoreCase = true))
+        val files = dir.listFiles { f ->
+            f.isFile && VIDEO_EXTENSIONS.any { ext -> f.name.endsWith(ext, ignoreCase = true) }
         } ?: emptyArray()
 
         return files.sortedByDescending { it.lastModified() }.map { file ->

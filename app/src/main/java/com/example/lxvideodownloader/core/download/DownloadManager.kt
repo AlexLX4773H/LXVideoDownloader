@@ -6,6 +6,7 @@ import com.example.lxvideodownloader.core.m3u8.M3U8Downloader
 import com.example.lxvideodownloader.core.m3u8.M3U8Parser
 import com.example.lxvideodownloader.core.model.DownloadStatus
 import com.example.lxvideodownloader.core.model.DownloadTask
+import com.example.lxvideodownloader.core.model.DownloadType
 import com.example.lxvideodownloader.core.model.HlsPlaylist
 import com.example.lxvideodownloader.core.model.StreamVariant
 import com.example.lxvideodownloader.core.storage.CompletedVideo
@@ -28,7 +29,8 @@ import java.util.concurrent.ConcurrentHashMap
 object DownloadManager {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val downloader = M3U8Downloader()
+    private val hlsDownloader = M3U8Downloader()
+    private val directDownloader = DirectDownloader()
 
     private val _tasks = MutableStateFlow<List<DownloadTask>>(emptyList())
     val tasks: StateFlow<List<DownloadTask>> = _tasks.asStateFlow()
@@ -47,10 +49,13 @@ object DownloadManager {
     }
 
     suspend fun inspectUrl(url: String): HlsPlaylist {
-        val playlistText = downloader.fetchPlaylist(url)
+        val playlistText = hlsDownloader.fetchPlaylist(url)
         return M3U8Parser.parse(playlistText, url)
     }
 
+    /**
+     * Start an HLS/M3U8 download (existing behavior).
+     */
     fun startDownload(
         context: Context,
         url: String,
@@ -66,13 +71,61 @@ object DownloadManager {
             url = selectedVariant?.url ?: url,
             title = effectiveTitle,
             outputFilePath = outputFile.absolutePath,
+            downloadType = DownloadType.HLS,
             status = DownloadStatus.QUEUED
         )
 
         _tasks.update { it + task }
         cancellationTokens[taskId] = false
 
-        // Start Foreground Service
+        startForegroundService(context, taskId)
+
+        val job = scope.launch {
+            executeHlsDownload(context, task, outputFile)
+        }
+        runningJobs[taskId] = job
+
+        return taskId
+    }
+
+    /**
+     * Start a direct video file download (MP4, WEBM, etc.).
+     */
+    fun startDirectDownload(
+        context: Context,
+        url: String,
+        title: String
+    ): String {
+        val taskId = UUID.randomUUID().toString()
+        val effectiveTitle = title.ifBlank { "video_${System.currentTimeMillis()}" }
+
+        // Determine file extension from URL
+        val extension = guessExtension(url)
+        val outputFile = VideoStorageHelper.generateOutputFile(context, effectiveTitle, extension)
+
+        val task = DownloadTask(
+            id = taskId,
+            url = url,
+            title = effectiveTitle,
+            outputFilePath = outputFile.absolutePath,
+            downloadType = DownloadType.DIRECT,
+            status = DownloadStatus.QUEUED
+        )
+
+        _tasks.update { it + task }
+        cancellationTokens[taskId] = false
+
+        startForegroundService(context, taskId)
+
+        val job = scope.launch {
+            executeDirectDownload(context, task, outputFile)
+        }
+        runningJobs[taskId] = job
+
+        return taskId
+    }
+
+    private fun startForegroundService(context: Context, taskId: String) {
         val serviceIntent = Intent(context, DownloadService::class.java).apply {
             action = DownloadService.ACTION_START
             putExtra(DownloadService.EXTRA_TASK_ID, taskId)
@@ -86,30 +139,23 @@ object DownloadManager {
         } catch (_: Exception) {
             // Service startup fallback
         }
-
-        val job = scope.launch {
-            executeDownload(context, task, outputFile)
-        }
-        runningJobs[taskId] = job
-
-        return taskId
     }
 
-    private suspend fun executeDownload(context: Context, initialTask: DownloadTask, outputFile: File) {
+    private suspend fun executeHlsDownload(context: Context, initialTask: DownloadTask, outputFile: File) {
         val taskId = initialTask.id
         try {
             updateTask(taskId) { it.copy(status = DownloadStatus.DOWNLOADING) }
 
             val streamUrl = initialTask.url
-            val playlistText = downloader.fetchPlaylist(streamUrl)
+            val playlistText = hlsDownloader.fetchPlaylist(streamUrl)
             val parsed = M3U8Parser.parse(playlistText, streamUrl)
 
             val mediaPlaylist = when (parsed) {
                 is HlsPlaylist.Media -> parsed
                 is HlsPlaylist.Master -> {
-                    val bestVariant = parsed.variants.firstOrNull() 
+                    val bestVariant = parsed.variants.firstOrNull()
                         ?: throw IllegalStateException("No stream variant found in playlist")
-                    val subText = downloader.fetchPlaylist(bestVariant.url)
+                    val subText = hlsDownloader.fetchPlaylist(bestVariant.url)
                     val subParsed = M3U8Parser.parse(subText, bestVariant.url)
                     if (subParsed is HlsPlaylist.Media) subParsed else throw IllegalStateException("Invalid media playlist")
                 }
@@ -124,7 +170,7 @@ object DownloadManager {
                 it.copy(totalSegments = segments.size)
             }
 
-            downloader.downloadSegments(
+            hlsDownloader.downloadSegments(
                 context = context,
                 taskId = taskId,
                 segments = segments,
@@ -154,7 +200,59 @@ object DownloadManager {
                 )
             }
 
-            // Export to gallery for convenience
+            VideoStorageHelper.exportToGallery(context, outputFile)
+            refreshCompletedVideos(context)
+
+        } catch (e: CancellationException) {
+            updateTask(taskId) {
+                it.copy(status = DownloadStatus.CANCELLED, speedBytesPerSec = 0)
+            }
+            if (outputFile.exists()) outputFile.delete()
+        } catch (e: Exception) {
+            updateTask(taskId) {
+                it.copy(
+                    status = DownloadStatus.FAILED,
+                    errorMessage = e.message ?: "Download failed",
+                    speedBytesPerSec = 0
+                )
+            }
+            if (outputFile.exists()) outputFile.delete()
+        } finally {
+            runningJobs.remove(taskId)
+            cancellationTokens.remove(taskId)
+        }
+    }
+
+    private suspend fun executeDirectDownload(context: Context, initialTask: DownloadTask, outputFile: File) {
+        val taskId = initialTask.id
+        try {
+            updateTask(taskId) { it.copy(status = DownloadStatus.DOWNLOADING) }
+
+            directDownloader.download(
+                url = initialTask.url,
+                outputFile = outputFile,
+                isCancelled = { cancellationTokens[taskId] == true },
+                onProgress = { bytesDownloaded, totalBytes, speed ->
+                    val progress = if (totalBytes > 0) bytesDownloaded.toFloat() / totalBytes else 0f
+                    updateTask(taskId) {
+                        it.copy(
+                            bytesDownloaded = bytesDownloaded,
+                            totalBytes = if (totalBytes > 0) totalBytes else 0L,
+                            progress = progress.coerceIn(0f, 1f),
+                            speedBytesPerSec = speed
+                        )
+                    }
+                }
+            )
+
+            updateTask(taskId) {
+                it.copy(
+                    status = DownloadStatus.COMPLETED,
+                    progress = 1f,
+                    speedBytesPerSec = 0
+                )
+            }
+
             VideoStorageHelper.exportToGallery(context, outputFile)
             refreshCompletedVideos(context)
 
@@ -199,6 +297,20 @@ object DownloadManager {
     private fun updateTask(taskId: String, transform: (DownloadTask) -> DownloadTask) {
         _tasks.update { list ->
             list.map { if (it.id == taskId) transform(it) else it }
+        }
+    }
+
+    private fun guessExtension(url: String): String {
+        val cleanUrl = url.substringBefore("?").substringBefore("#").lowercase()
+        return when {
+            cleanUrl.endsWith(".webm") -> "webm"
+            cleanUrl.endsWith(".mkv") -> "mkv"
+            cleanUrl.endsWith(".avi") -> "avi"
+            cleanUrl.endsWith(".mov") -> "mov"
+            cleanUrl.endsWith(".flv") -> "flv"
+            cleanUrl.endsWith(".ts") -> "ts"
+            cleanUrl.endsWith(".3gp") -> "3gp"
+            else -> "mp4" // Default to mp4
         }
     }
 }

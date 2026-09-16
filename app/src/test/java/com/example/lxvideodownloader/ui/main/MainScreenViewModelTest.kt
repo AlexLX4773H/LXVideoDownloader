@@ -69,6 +69,12 @@ private class FakeDataRepository : DataRepository {
         variant: StreamVariant?
     ): String = "fake_task_id"
 
+    override fun startDirectDownload(
+        context: Context,
+        url: String,
+        title: String
+    ): String = "fake_direct_task_id"
+
     override fun cancelDownload(taskId: String) {}
 
     override fun removeTask(taskId: String) {}

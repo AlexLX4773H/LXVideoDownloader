@@ -14,6 +14,7 @@ interface DataRepository {
     fun refreshVideos(context: Context)
     suspend fun inspectUrl(url: String): HlsPlaylist
     fun startDownload(context: Context, url: String, title: String, variant: StreamVariant?): String
+    fun startDirectDownload(context: Context, url: String, title: String): String
     fun cancelDownload(taskId: String)
     fun removeTask(taskId: String)
     fun deleteVideo(context: Context, video: CompletedVideo)
@@ -38,6 +39,14 @@ class DefaultDataRepository : DataRepository {
         variant: StreamVariant?
     ): String {
         return DownloadManager.startDownload(context, url, title, variant)
+    }
+
+    override fun startDirectDownload(
+        context: Context,
+        url: String,
+        title: String
+    ): String {
+        return DownloadManager.startDirectDownload(context, url, title)
     }
 
     override fun cancelDownload(taskId: String) {

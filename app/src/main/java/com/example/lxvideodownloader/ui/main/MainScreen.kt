@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Downloading
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
@@ -87,6 +88,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import com.example.lxvideodownloader.core.model.DownloadStatus
 import com.example.lxvideodownloader.core.model.DownloadTask
+import com.example.lxvideodownloader.core.model.DownloadType
 import com.example.lxvideodownloader.core.model.StreamVariant
 import com.example.lxvideodownloader.core.storage.CompletedVideo
 import com.example.lxvideodownloader.ui.player.VideoPlayerDialog
@@ -98,6 +100,7 @@ import java.util.Locale
 @Composable
 fun MainScreen(
     onItemClick: (NavKey) -> Unit = {},
+    onNavigateToWebBrowser: (String) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: MainScreenViewModel = viewModel()
 ) {
@@ -126,6 +129,14 @@ fun MainScreen(
         }
     }
 
+    // Navigate to WebView browser when ViewModel requests it
+    LaunchedEffect(uiState.pendingWebBrowserUrl) {
+        uiState.pendingWebBrowserUrl?.let { url ->
+            viewModel.consumeWebBrowserNavigation()
+            onNavigateToWebBrowser(url)
+        }
+    }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -146,7 +157,7 @@ fun MainScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "HLS / M3U8 Stream Grabber",
+                                text = "Video Downloader",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -265,6 +276,13 @@ private fun DownloadInputTab(
 ) {
     val context = LocalContext.current
 
+    // Determine if the URL is a direct M3U8 link
+    val urlLower = uiState.urlInput.trim().substringBefore("?").substringBefore("#").lowercase()
+    val isM3u8 = urlLower.endsWith(".m3u8")
+    val isDirectVideo = listOf(".mp4", ".webm", ".mkv", ".avi", ".mov", ".flv", ".ts", ".3gp")
+        .any { urlLower.endsWith(it) }
+    val isWebPage = uiState.urlInput.isNotBlank() && !isM3u8 && !isDirectVideo
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -281,7 +299,7 @@ private fun DownloadInputTab(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        text = "New Video Stream",
+                        text = "Grab Video",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -289,10 +307,13 @@ private fun DownloadInputTab(
                     OutlinedTextField(
                         value = uiState.urlInput,
                         onValueChange = onUrlChange,
-                        label = { Text("M3U8 Stream URL") },
-                        placeholder = { Text("https://example.com/playlist.m3u8") },
+                        label = { Text("Video URL or Web Page") },
+                        placeholder = { Text("https://example.com/video.mp4 or web page") },
                         leadingIcon = {
-                            Icon(Icons.Default.Link, contentDescription = null)
+                            Icon(
+                                if (isWebPage) Icons.Default.Language else Icons.Default.Link,
+                                contentDescription = null
+                            )
                         },
                         trailingIcon = {
                             Row {
@@ -320,6 +341,23 @@ private fun DownloadInputTab(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    // Show contextual hint based on URL type
+                    if (uiState.urlInput.isNotBlank()) {
+                        val hintText = when {
+                            isM3u8 -> "🎯 Direct M3U8 stream detected — will parse immediately"
+                            isDirectVideo -> "📥 Direct video file — will download immediately"
+                            isWebPage -> "🌐 Web page — will open browser to find videos"
+                            else -> null
+                        }
+                        hintText?.let {
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
 
                     OutlinedTextField(
                         value = uiState.titleInput,
@@ -352,9 +390,19 @@ private fun DownloadInputTab(
                             Spacer(modifier = Modifier.width(10.dp))
                             Text("Analyzing Playlist...")
                         } else {
-                            Icon(Icons.Default.CloudDownload, contentDescription = null)
+                            Icon(
+                                if (isWebPage) Icons.Default.Language else Icons.Default.CloudDownload,
+                                contentDescription = null
+                            )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Download Stream", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = when {
+                                    isWebPage -> "Open & Find Videos"
+                                    isDirectVideo -> "Download Video"
+                                    else -> "Download Stream"
+                                },
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
                     }
                 }
@@ -386,11 +434,13 @@ private fun DownloadInputTab(
                         )
                     }
                     Text(
-                        text = "• HLS Master & Media Playlists (.m3u8)\n" +
+                        text = "• Paste any URL — web page, M3U8, MP4, or direct video link\n" +
+                               "• Web page video extraction via built-in browser\n" +
+                               "• HLS Master & Media Playlists (.m3u8)\n" +
                                "• Automatic multi-quality resolution selector\n" +
                                "• High-speed concurrent TS chunk downloads\n" +
+                               "• Direct MP4/WEBM/MKV file downloads with progress\n" +
                                "• Standard AES-128 stream decryption\n" +
-                               "• Merges chunks into a unified playable video file\n" +
                                "• Background downloading with persistent notifications",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -505,10 +555,19 @@ private fun TaskCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (task.status == DownloadStatus.DOWNLOADING) {
-                    Text(
-                        text = "${task.downloadedSegments} / ${task.totalSegments} parts",
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                    if (task.downloadType == DownloadType.HLS) {
+                        // HLS: show segment progress
+                        Text(
+                            text = "${task.downloadedSegments} / ${task.totalSegments} parts",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    } else {
+                        // Direct: show bytes progress
+                        Text(
+                            text = "${formatBytes(task.bytesDownloaded)} / ${if (task.totalBytes > 0) formatBytes(task.totalBytes) else "???"}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                     Text(
                         text = formatSpeed(task.speedBytesPerSec),
                         style = MaterialTheme.typography.bodySmall,
@@ -522,7 +581,7 @@ private fun TaskCard(
                     )
                 } else if (task.status == DownloadStatus.QUEUED) {
                     Text(
-                        text = "Preparing stream chunks...",
+                        text = if (task.downloadType == DownloadType.HLS) "Preparing stream chunks..." else "Starting download...",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -782,5 +841,14 @@ private fun formatSpeed(bytesPerSec: Long): String {
         bytesPerSec >= 1024 * 1024 -> String.format(Locale.US, "%.1f MB/s", bytesPerSec / (1024.0 * 1024))
         bytesPerSec >= 1024 -> String.format(Locale.US, "%.0f KB/s", bytesPerSec / 1024.0)
         else -> "$bytesPerSec B/s"
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    return when {
+        bytes >= 1024 * 1024 * 1024 -> String.format(Locale.US, "%.2f GB", bytes / (1024.0 * 1024 * 1024))
+        bytes >= 1024 * 1024 -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024))
+        bytes >= 1024 -> String.format(Locale.US, "%.0f KB", bytes / 1024.0)
+        else -> "$bytes B"
     }
 }

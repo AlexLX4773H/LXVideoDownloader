@@ -42,13 +42,20 @@ enum class DownloadStatus {
     CANCELLED
 }
 
+enum class DownloadType {
+    HLS,
+    DIRECT
+}
+
 data class DownloadTask(
     val id: String,
     val url: String,
     val title: String,
     val outputFilePath: String,
+    val downloadType: DownloadType = DownloadType.HLS,
     val totalSegments: Int = 0,
     val downloadedSegments: Int = 0,
+    val totalBytes: Long = 0L,
     val progress: Float = 0f,
     val bytesDownloaded: Long = 0L,
     val speedBytesPerSec: Long = 0L,
